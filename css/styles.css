@@ -49,6 +49,143 @@ input:focus-visible {
   outline-offset: 2px;
 }
 
+/* ---------- Login screen ---------- */
+
+.login-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--blue-900) 0%, var(--blue-700) 55%, var(--blue-500) 100%);
+  padding: 20px;
+}
+
+.login-screen.hidden { display: none; }
+
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--white);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lift);
+  padding: 32px 28px 26px;
+  text-align: center;
+}
+
+.login-brand img {
+  height: 32px;
+  margin-bottom: 18px;
+}
+
+.login-title {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--blue-900);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin: 0 0 6px;
+}
+
+.login-subtitle {
+  font-size: 13px;
+  color: var(--gray-600);
+  margin: 0 0 22px;
+}
+
+#loginForm { text-align: left; }
+
+.login-label {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--gray-600);
+  margin: 14px 0 6px;
+}
+
+.login-input {
+  width: 100%;
+  font-family: var(--font-body);
+  font-size: 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1.5px solid var(--gray-300);
+  background: var(--white);
+  color: var(--ink);
+}
+
+.login-input:focus-visible {
+  outline: 3px solid var(--blue-500);
+  outline-offset: 1px;
+}
+
+.login-error {
+  min-height: 18px;
+  font-size: 12.5px;
+  color: var(--red-600);
+  font-weight: 600;
+  margin-top: 10px;
+}
+
+.login-submit {
+  width: 100%;
+  margin-top: 8px;
+  background: var(--red-600);
+  color: var(--white);
+  border: none;
+  padding: 11px;
+  border-radius: 8px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  box-shadow: var(--shadow);
+}
+
+.login-submit:hover { transform: translateY(-1px); }
+.login-submit:disabled { opacity: 0.6; }
+
+.login-note {
+  margin: 18px 0 0;
+  font-size: 11.5px;
+  color: var(--gray-600);
+  line-height: 1.5;
+}
+
+/* ---------- User badge ---------- */
+
+.user-badge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--white);
+  font-weight: 600;
+  padding-right: 14px;
+  border-right: 1px solid rgba(231, 241, 250, 0.3);
+}
+
+.logout-btn {
+  font-family: var(--font-display);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--blue-100);
+  background: rgba(255, 255, 255, 0.12);
+  border: none;
+  padding: 5px 10px;
+  border-radius: 999px;
+}
+
+.logout-btn:hover { background: rgba(255, 255, 255, 0.22); }
+
 /* ---------- Header ---------- */
 
 .site-header {
@@ -179,82 +316,170 @@ input:focus-visible {
   padding: 18px 28px 6px;
   display: flex;
   flex-wrap: wrap;
-  gap: 14px;
-  align-items: flex-end;
+  gap: 12px;
+  align-items: flex-start;
+  position: relative;
+  z-index: 30;
 }
 
-.filter-group {
+/* ---------------- Metric Type toggle (Amount / Volume) ---------------- */
+
+.metric-toggle {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 160px;
+  background: var(--gray-100);
+  border-radius: 999px;
+  padding: 3px;
+  gap: 2px;
+  align-self: center;
 }
 
-.filter-group label {
+.metric-btn {
   font-family: var(--font-display);
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 8px 16px;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
   color: var(--gray-600);
 }
 
-.filter-group label .hint {
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: none;
-  color: var(--gray-300);
-  font-size: 10px;
+.metric-btn.active {
+  background: var(--blue-700);
+  color: var(--white);
+  box-shadow: var(--shadow);
 }
 
-.chip-group.scroll {
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  max-width: 480px;
-  padding-bottom: 4px;
+.metric-btn:hover:not(.active) {
+  color: var(--blue-700);
 }
 
-.chip-group.scroll .chip {
-  flex-shrink: 0;
+/* ---------------- Dropdown checklist filter component ---------------- */
+
+.dropdown-filter {
+  position: relative;
 }
 
-.filter-group select {
+.dropdown-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-family: var(--font-body);
-  font-size: 14px;
+  font-size: 13.5px;
   padding: 9px 12px;
   border-radius: 8px;
   border: 1.5px solid var(--gray-300);
   background: var(--white);
   color: var(--ink);
-  min-width: 170px;
+  min-width: 190px;
+  text-align: left;
 }
 
-.chip-group {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.chip {
-  font-family: var(--font-body);
-  font-size: 13px;
-  padding: 8px 14px;
-  border-radius: 999px;
-  border: 1.5px solid var(--gray-300);
-  background: var(--white);
-  color: var(--gray-600);
-  transition: all 0.15s ease;
-}
-
-.chip.active {
-  background: var(--blue-700);
-  border-color: var(--blue-700);
-  color: var(--white);
-}
-
-.chip:hover:not(.active) {
+.dropdown-filter.open .dropdown-btn {
   border-color: var(--blue-500);
+  box-shadow: 0 0 0 3px rgba(28, 124, 199, 0.15);
+}
+
+.dropdown-label {
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--gray-600);
+}
+
+.dropdown-value {
+  flex: 1;
+  font-weight: 600;
+  color: var(--blue-900);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dropdown-btn .chev {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--gray-600);
+  transition: transform 0.15s ease;
+}
+
+.dropdown-filter.open .dropdown-btn .chev {
+  transform: rotate(180deg);
+}
+
+.dropdown-panel {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 240px;
+  max-width: 320px;
+  background: var(--white);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lift);
+  border: 1px solid var(--gray-300);
+  z-index: 50;
+  overflow: hidden;
+}
+
+.dropdown-filter.open .dropdown-panel {
+  display: block;
+}
+
+.dropdown-panel-actions {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--gray-100);
+  background: var(--gray-100);
+}
+
+.dropdown-panel-actions button {
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   color: var(--blue-700);
+  background: none;
+  border: none;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.dropdown-panel-actions button:hover {
+  background: var(--blue-100);
+}
+
+.dropdown-options {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.dropdown-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 12px;
+  font-size: 13.5px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.dropdown-option:hover {
+  background: var(--gray-100);
+}
+
+.dropdown-option input[type="checkbox"] {
+  accent-color: var(--blue-700);
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
 }
 
 /* ---------- Layout ---------- */
@@ -534,8 +759,9 @@ main {
 .chart-wrap.small { height: 160px; }
 
 .topline-metrics {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: 10px;
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px solid var(--gray-100);
