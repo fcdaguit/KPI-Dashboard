@@ -10,6 +10,9 @@ const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov
 const BRAND = { blue: "#0057A0", blueDark: "#003D73", red: "#D62828", gray: "#9AA7B4" };
 const STATIC_DATA_URL = "data/sales-data.json";
 const SHEETS_CONFIG_URL = "data/sheets-config.json";
+const USERS_CONFIG_URL = "data/users-config.json";
+const USERS_FALLBACK_URL = "data/users.json";
+const SESSION_KEY = "fast_kpi_session_v1";
 
 const REQUIRED_CSV_COLUMNS = [
   "Branch/Site", "Principal/Supplier", "Channel", "Category",
@@ -20,12 +23,20 @@ const state = {
   raw: [],
   source: "sample",     // "live" | "sample"
   sourceErrors: [],
-  principal: "All",
-  branch: "All",
-  periods: new Set(),   // Set of "<year>-<monthIndex>", multi-select; never empty once data loads
-  channels: new Set(),
-  categories: new Set(),
+  metricType: "Amount",  // "Amount" | "Volume" — single-select, not part of the checkbox filters
+  principals: new Set(), // multi-select; empty = "All"
+  branches: new Set(),   // multi-select; empty = "All"
+  periods: new Set(),    // Set of "<year>-<monthIndex>", multi-select; never empty once data loads
+  channels: new Set(),   // multi-select; empty = "All"
+  categories: new Set(), // multi-select; empty = "All" (unchanged UI — chip toggles)
 };
+
+// Auth: which Principals the signed-in user is allowed to see at all.
+// null = no restriction (unauthenticated dev/default state, or an admin
+// account with an empty Principals list). Only the username + this list
+// are ever persisted client-side — never the password.
+let currentUser = null;
+let sessionAllowedPrincipals = null;
 
 let trendChart, yoyChart;
 let principalPieChart, branchPieChart;
@@ -36,9 +47,28 @@ const cssId = (s) => String(s).replace(/[^a-zA-Z0-9]/g, "_");
 const PIE_COLORS = ["#0057A0", "#D62828", "#1C7CC7", "#F0A202", "#6C4AB6", "#2E8B57", "#9AA7B4", "#003D73"];
 
 const $ = (sel) => document.querySelector(sel);
-const fmtPeso = (n) => "₱" + Math.round(n).toLocaleString("en-PH");
-const fmtCompact = (n) => "₱" + new Intl.NumberFormat("en-PH", { notation: "compact", maximumFractionDigits: 1 }).format(n);
-const fmtMillions = (n) => "₱" + (n / 1_000_000).toFixed(1) + "M";
+const $$ = (sel) => [...document.querySelectorAll(sel)];
+/** A representative unit label (e.g. "Liters") for the current Volume data,
+ * used across every value-formatting helper below. */
+function currentUnitLabel() {
+  const found = state.raw.find((r) => r.metricType === "Volume" && r.unit);
+  return found ? found.unit : "units";
+}
+const UNIT_ABBREV = { Liters: "L", Litres: "L", Kilograms: "kg", Kilogram: "kg", Cases: "cs", Units: "pcs", Pieces: "pcs" };
+function currentUnitAbbrev() {
+  const label = currentUnitLabel();
+  return UNIT_ABBREV[label] || label;
+}
+
+const fmtPeso = (n) => state.metricType === "Volume"
+  ? Math.round(n).toLocaleString("en-PH") + " " + currentUnitAbbrev()
+  : "₱" + Math.round(n).toLocaleString("en-PH");
+const fmtCompact = (n) => state.metricType === "Volume"
+  ? new Intl.NumberFormat("en-PH", { notation: "compact", maximumFractionDigits: 1 }).format(n) + " " + currentUnitAbbrev()
+  : "₱" + new Intl.NumberFormat("en-PH", { notation: "compact", maximumFractionDigits: 1 }).format(n);
+const fmtMillions = (n) => state.metricType === "Volume"
+  ? (n / 1_000_000).toFixed(1) + "M " + currentUnitAbbrev()
+  : "₱" + (n / 1_000_000).toFixed(1) + "M";
 const sortKey = (r) => r.year * 100 + MONTHS.indexOf(r.month);
 
 /* ---------------- CSV parsing (RFC4180-ish) ---------------- */
@@ -86,12 +116,18 @@ function parseCSV(text) {
 // internal field names that are part of the core schema — anything else
 // found in a CSV/sheet is treated as an auto-detected extra dimension
 // (Salesman, Area, Supervisor, etc.)
-const KNOWN_FIELDS = new Set(["branch", "principal", "channel", "category", "month", "year", "target", "actual", "achievement"]);
+const KNOWN_FIELDS = new Set(["branch", "principal", "channel", "category", "month", "year", "target", "actual", "achievement", "metricType", "unit"]);
+// Optional (not required) CSV columns that map to core schema fields —
+// present when a principal reports Volume alongside Amount. Excluded from
+// auto-detected extra dimensions the same way REQUIRED_CSV_COLUMNS is.
+const OPTIONAL_KNOWN_COLUMNS = ["Metric Type", "Unit"];
 
 function csvRowsToData(csvRows, sourceLabel) {
   const missing = REQUIRED_CSV_COLUMNS.filter((c) => csvRows.length && !(c in csvRows[0]));
   if (missing.length) throw new Error(`${sourceLabel}: missing column(s) ${missing.join(", ")}`);
-  const extraCols = csvRows.length ? Object.keys(csvRows[0]).filter((c) => !REQUIRED_CSV_COLUMNS.includes(c)) : [];
+  const extraCols = csvRows.length
+    ? Object.keys(csvRows[0]).filter((c) => !REQUIRED_CSV_COLUMNS.includes(c) && !OPTIONAL_KNOWN_COLUMNS.includes(c))
+    : [];
 
   return csvRows
     .filter((r) => r["Branch/Site"] && r["Target Sales"])
@@ -108,6 +144,10 @@ function csvRowsToData(csvRows, sourceLabel) {
         target,
         actual,
         achievement: target ? Math.round((actual / target) * 1000) / 10 : 0,
+        // optional — a principal that doesn't report Volume just omits these
+        // columns entirely, and every row defaults to "Amount"
+        metricType: (r["Metric Type"] && r["Metric Type"].trim()) || "Amount",
+        unit: (r["Unit"] && r["Unit"].trim()) || "",
       };
       // pass through any extra columns as-is (e.g. Salesman, Area, Supervisor)
       extraCols.forEach((c) => { if (r[c]) row[c] = r[c]; });
@@ -182,43 +222,221 @@ async function loadData() {
   return { rows, source: "live", errors };
 }
 
+/* ---------------- Auth: users directory + session (soft access gate — see README) ---------------- */
+
+/** Loads the user directory: from a published-to-web Users Google Sheet if
+ * configured, otherwise the bundled data/users.json. Each user record:
+ * { username, password, principals: string[] } — an empty/missing
+ * `principals` list means "no restriction" (sees every Principal). */
+async function loadUsers() {
+  try {
+    const cfgRes = await fetch(USERS_CONFIG_URL, { cache: "no-store" });
+    const cfg = cfgRes.ok ? await cfgRes.json() : {};
+    if (cfg.url && cfg.url.trim()) {
+      const res = await fetch(cfg.url, { cache: "no-store" });
+      if (res.ok) {
+        const text = await res.text();
+        const csvRows = parseCSV(text);
+        const users = csvRows
+          .map((r) => ({
+            username: (r["Username"] || "").trim(),
+            password: (r["Password"] || "").trim(),
+            principals: (r["Principals"] || "").split(";").map((s) => s.trim()).filter(Boolean),
+          }))
+          .filter((u) => u.username);
+        if (users.length) return users;
+      }
+    }
+  } catch (err) {
+    console.error("Live user directory unavailable, falling back to bundled users.json:", err);
+  }
+  try {
+    const res = await fetch(USERS_FALLBACK_URL, { cache: "no-store" });
+    if (res.ok) return res.json();
+  } catch (err) {
+    console.error(err);
+  }
+  return [];
+}
+
+async function attemptLogin(username, password) {
+  const users = await loadUsers();
+  const match = users.find(
+    (u) => u.username.toLowerCase() === username.trim().toLowerCase() && u.password === password
+  );
+  return match || null;
+}
+
+function persistSession(username, principals) {
+  // Only the username + allowed-Principals list is stored — never the
+  // password — so a shared/public computer doesn't leak credentials.
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify({ username, principals }));
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+function restoreSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const session = JSON.parse(raw);
+    if (!session || !session.username || !Array.isArray(session.principals)) return null;
+    return session;
+  } catch {
+    return null;
+  }
+}
+
+function clearSession() {
+  try {
+    localStorage.removeItem(SESSION_KEY);
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+function applySession(session) {
+  currentUser = session.username;
+  sessionAllowedPrincipals = session.principals.length ? new Set(session.principals) : null;
+  const badge = $("#userBadgeName");
+  if (badge) {
+    badge.textContent = sessionAllowedPrincipals
+      ? `${currentUser} · ${session.principals.length} principal${session.principals.length > 1 ? "s" : ""}`
+      : `${currentUser} · All principals`;
+  }
+}
+
+function showLoginScreen() {
+  $("#loginScreen").classList.remove("hidden");
+  $("#appShell").classList.add("hidden");
+}
+
+function hideLoginScreen() {
+  $("#loginScreen").classList.add("hidden");
+  $("#appShell").classList.remove("hidden");
+}
+
+function wireLoginForm() {
+  $("#loginForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const username = $("#loginUsername").value;
+    const password = $("#loginPassword").value;
+    const errorEl = $("#loginError");
+    const btn = $("#loginSubmitBtn");
+    errorEl.textContent = "";
+    btn.disabled = true;
+    btn.textContent = "Signing in…";
+    try {
+      const match = await attemptLogin(username, password);
+      if (!match) {
+        errorEl.textContent = "Incorrect username or password.";
+        return;
+      }
+      persistSession(match.username, match.principals || []);
+      applySession({ username: match.username, principals: match.principals || [] });
+      hideLoginScreen();
+      await startDashboard();
+    } catch (err) {
+      console.error(err);
+      errorEl.textContent = "Could not reach the user directory. Check your connection and try again.";
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Sign In";
+    }
+  });
+
+  $("#logoutBtn").addEventListener("click", () => {
+    clearSession();
+    location.reload();
+  });
+}
+
 function uniq(arr) { return [...new Set(arr)]; }
 
+/** Guarantees every row has metricType/unit even if it came from a data
+ * source (old cached JSON, a live Sheet without these columns) that
+ * predates this feature — defaults to "Amount" with no unit. */
+function normalizeRows(rows) {
+  rows.forEach((r) => {
+    if (!r.metricType) r.metricType = "Amount";
+    if (!r.unit) r.unit = "";
+  });
+  return rows;
+}
+
+// Inclusion-based multi-select: each Set holds the values currently INCLUDED
+// (checkbox checked). All available values are selected by default; unchecking
+// excludes that value. An empty set means "nothing matches" (all unchecked).
+// Every row is also always filtered down to the currently-selected Metric
+// Type (Amount/Volume) first — see state.metricType.
 function scoped(rows, { ignorePrincipal = false, ignoreBranch = false, ignoreChannel = false, ignoreCategory = false } = {}) {
   return rows.filter((r) => {
-    if (!ignorePrincipal && state.principal !== "All" && r.principal !== state.principal) return false;
-    if (!ignoreBranch && state.branch !== "All" && r.branch !== state.branch) return false;
-    if (!ignoreChannel && state.channels.size && !state.channels.has(r.channel)) return false;
-    if (!ignoreCategory && state.categories.size && !state.categories.has(r.category)) return false;
+    if (r.metricType !== state.metricType) return false;
+    if (!ignorePrincipal && !state.principals.has(r.principal)) return false;
+    if (!ignoreBranch && !state.branches.has(r.branch)) return false;
+    if (!ignoreChannel && !state.channels.has(r.channel)) return false;
+    if (!ignoreCategory && !state.categories.has(r.category)) return false;
     return true;
   });
 }
 
-/* ---------------- Filter population ---------------- */
+/* ---------------- Filter population (5 unified dropdown checklists) ---------------- */
 
-function populateFilters() {
-  const principals = uniq(state.raw.map((r) => r.principal)).sort();
-  const principalSelect = $("#principalSelect");
-  principalSelect.innerHTML = ["All Principals", ...principals]
-    .map((p) => `<option value="${p === "All Principals" ? "All" : p}">${p}</option>`)
-    .join("");
-  principalSelect.value = state.principal;
+const FIELD_TO_STATE_KEY = { principal: "principals", branch: "branches", channel: "channels", category: "categories", period: "periods" };
+const DROPDOWN_FIELDS = ["principal", "branch", "period", "channel", "category"];
+// Principal is the sole top-level field — its dropdown always shows every
+// value; relationships elsewhere are reflected only via checkbox state.
+const PRIMARY_FIELDS = ["principal"];
+// Branch/Site, Channel, and Category are all DERIVED from Principal (and,
+// for Channel/Category, from Branch too) — their dropdown lists actually
+// shrink/hide to only what's reachable, not just uncheck.
+const SECONDARY_FIELDS = ["branch", "channel", "category"];
 
-  refreshBranchOptions();
-  refreshChips("#channelChips", "channel");
-  refreshChips("#categoryChips", "category");
+// Tracks every value ever seen per field, so a data refresh can tell a
+// genuinely NEW value (default it to included) from one the user
+// deliberately unchecked (leave it excluded). Not used for "branch", which
+// hard-resets to "all related" on every Principal change instead (see
+// cascadeBranchFromPrincipal).
+const knownValues = { principal: new Set(), branch: new Set(), channel: new Set(), category: new Set() };
 
-  populatePeriodChips();
+/** Every row matching the currently-selected Metric Type (Amount/Volume) —
+ * the base pool every dropdown's options are drawn from. */
+function metricRows(rows) {
+  return rows.filter((r) => r.metricType === state.metricType);
 }
 
-/** All available (year, month-index) periods across the whole dataset,
- * newest first. Value format: "<year>-<monthIndex>", e.g. "2026-6" = Jul 2026. */
-function allPeriods() {
-  return uniq(state.raw.map((r) => `${r.year}-${MONTHS.indexOf(r.month)}`)).sort((a, b) => {
-    const [ay, am] = a.split("-").map(Number);
-    const [by, bm] = b.split("-").map(Number);
-    return by - ay || bm - am;
-  });
+/** The row pool a field's option list is computed from (always scoped to
+ * the current Metric Type first):
+ * - Principal draws from the full dataset, restricted to the signed-in
+ *   user's assigned Principals if any (see sessionAllowedPrincipals).
+ * - Branch draws from rows matching the current Principal selection.
+ * - Channel/Category draw from rows matching the current Principal AND
+ *   Branch selection. */
+function poolForField(field) {
+  const base = metricRows(state.raw);
+  if (field === "principal") {
+    return sessionAllowedPrincipals
+      ? base.filter((r) => sessionAllowedPrincipals.has(r.principal))
+      : base;
+  }
+  if (field === "branch") {
+    return base.filter((r) => state.principals.has(r.principal));
+  }
+  if (field === "channel" || field === "category") {
+    return base.filter((r) => state.principals.has(r.principal) && state.branches.has(r.branch));
+  }
+  return base;
+}
+
+/** What a dropdown actually displays. Principal: the full list, or just the
+ * signed-in user's assigned Principals if their account is scoped.
+ * Branch/Channel/Category: shrinks/hides to match the current upstream
+ * selection (Branch ← Principal; Channel/Category ← Principal + Branch). */
+function displayValues(field) {
+  if (field === "period") return allPeriods();
+  return uniq(poolForField(field).map((r) => r[field])).sort();
 }
 
 function periodLabelFor(value) {
@@ -226,77 +444,204 @@ function periodLabelFor(value) {
   return `${MONTHS[mi]} ${y}`;
 }
 
-function populatePeriodChips() {
-  const container = $("#periodChips");
+function labelForValue(field, v) {
+  return field === "period" ? periodLabelFor(v) : v;
+}
+
+/** All available (year, month-index) periods for the current Metric Type,
+ * newest first. Value format: "<year>-<monthIndex>", e.g. "2026-6" = Jul 2026. */
+function allPeriods() {
+  return uniq(metricRows(state.raw).map((r) => `${r.year}-${MONTHS.indexOf(r.month)}`)).sort((a, b) => {
+    const [ay, am] = a.split("-").map(Number);
+    const [by, bm] = b.split("-").map(Number);
+    return by - ay || bm - am;
+  });
+}
+
+/** Sync a checkbox-list field's included Set against its current pool
+ * (see poolForField): newly-reachable values default to included; values no
+ * longer reachable are pruned; values already known and still reachable
+ * keep whatever checked/unchecked state the user left them in. Used at
+ * init/Refresh time, and to re-sync Channel/Category whenever Principal or
+ * Branch's selection changes. (Branch itself uses a hard reset instead —
+ * see cascadeBranchFromPrincipal.) */
+function syncCheckField(field) {
+  const values = displayValues(field);
+  const stateKey = FIELD_TO_STATE_KEY[field];
+  const included = state[stateKey];
+  const known = knownValues[field];
+
+  values.forEach((v) => {
+    if (!known.has(v)) { known.add(v); included.add(v); } // brand-new/newly-reachable value → included by default
+  });
+  [...included].forEach((v) => { if (!values.includes(v)) included.delete(v); });
+  [...known].forEach((v) => { if (!values.includes(v)) known.delete(v); });
+}
+
+/** "<year>-<monthIndex>" for today's real-world calendar month. */
+function currentMonthPeriodValue() {
+  const now = new Date();
+  return `${now.getFullYear()}-${now.getMonth()}`;
+}
+
+/** Reporting Period defaults to the CURRENT calendar month (falling back to
+ * the most recent period in the data if the current month isn't present
+ * yet). This resets every time populateFilters() runs — i.e. on initial
+ * load and every time Refresh is clicked. */
+function syncPeriods() {
   const periods = allPeriods();
-  if (!periods.length) {
-    container.innerHTML = "";
-    state.periods = new Set();
-    return;
+  if (!periods.length) { state.periods = new Set(); return; }
+  const currentValue = currentMonthPeriodValue();
+  state.periods = new Set([periods.includes(currentValue) ? currentValue : periods[0]]);
+}
+
+/** Branch/Site is hard-reset to "every branch related to the currently
+ * checked Principal(s)", all checked — matching "when a specific Principal
+ * is selected, only the related Branch/Site should be checked and
+ * displayed, while all others are hidden" / "Select All on Principal checks
+ * and shows every Branch". Call whenever Principal's checked state changes. */
+function cascadeBranchFromPrincipal() {
+  const branches = uniq(state.raw.filter((r) => state.principals.has(r.principal)).map((r) => r.branch)).sort();
+  state.branches = new Set(branches);
+  knownValues.branch = new Set(branches);
+}
+
+/** Re-sync Channel/Category against the current Principal+Branch pool.
+ * Call this any time Principal or Branch's checked state changes. */
+function cascadeChannelCategory() {
+  syncCheckField("channel");
+  syncCheckField("category");
+}
+
+function renderDropdown(field) {
+  const stateKey = FIELD_TO_STATE_KEY[field];
+  const set = state[stateKey];
+  const values = displayValues(field);
+
+  const optionsEl = document.querySelector(`[data-options="${field}"]`);
+  optionsEl.innerHTML = values.length
+    ? values.map((v) => `
+        <label class="dropdown-option">
+          <input type="checkbox" data-field="${field}" value="${v}" ${set.has(v) ? "checked" : ""}>
+          <span>${labelForValue(field, v)}</span>
+        </label>
+      `).join("")
+    : `<div class="state-banner" style="padding:16px;">No related options.</div>`;
+
+  const valueEl = document.querySelector(`[data-value-for="${field}"]`);
+  if (!values.length) valueEl.textContent = "None";
+  else if (set.size === 0) valueEl.textContent = "None";
+  else if (set.size === values.length) valueEl.textContent = field === "period" ? "Latest" : "All";
+  else if (set.size === 1) valueEl.textContent = labelForValue(field, [...set][0]);
+  else valueEl.textContent = `${set.size} selected`;
+}
+
+function renderSecondaryDropdowns() { SECONDARY_FIELDS.forEach(renderDropdown); }
+
+/** Call whenever Principal's checked state changes (individual toggle or
+ * bulk action): resets Branch to all-related-checked, then re-syncs
+ * Channel/Category downstream of that. */
+function cascadeFromPrincipal() {
+  cascadeBranchFromPrincipal();
+  cascadeChannelCategory();
+}
+
+function populateFilters() {
+  syncCheckField("principal");
+  cascadeBranchFromPrincipal();
+  cascadeChannelCategory();
+  syncPeriods();
+  DROPDOWN_FIELDS.forEach(renderDropdown);
+}
+
+function selectionSummaryText(field) {
+  const stateKey = FIELD_TO_STATE_KEY[field];
+  const set = state[stateKey];
+  const values = displayValues(field);
+  if (!set.size) return "no selection";
+  if (set.size === values.length) return field === "principal" ? "All principals" : `All ${field}s`;
+  if (set.size === 1) return labelForValue(field, [...set][0]);
+  return `${set.size} ${field}s selected`;
+}
+
+/** Call after any field's included Set has been mutated (checkbox toggle or
+ * bulk action) to trigger the right downstream cascade and redraw whatever
+ * dropdowns need to reflect it. */
+function handleFieldChanged(field) {
+  if (field === "principal") {
+    cascadeFromPrincipal(); // hard-resets Branch to all-related, then re-syncs Channel/Category
+    renderDropdown("principal");
+    renderSecondaryDropdowns(); // branch, channel, category
+  } else if (field === "branch") {
+    cascadeChannelCategory(); // Channel/Category also depend on Branch
+    renderDropdown("branch");
+    renderDropdown("channel");
+    renderDropdown("category");
+  } else {
+    renderDropdown(field); // channel/category/period: purely local toggle
   }
-  // prune stale selections; default to the single latest period
-  [...state.periods].forEach((p) => { if (!periods.includes(p)) state.periods.delete(p); });
-  if (state.periods.size === 0) state.periods.add(periods[0]);
-
-  container.innerHTML = periods
-    .map((p) => `<button type="button" class="chip${state.periods.has(p) ? " active" : ""}" data-field="period" data-value="${p}">${periodLabelFor(p)}</button>`)
-    .join("");
-}
-
-function refreshBranchOptions() {
-  const pool = scoped(state.raw, { ignoreBranch: true, ignoreChannel: true, ignoreCategory: true });
-  const branches = uniq(pool.map((r) => r.branch)).sort();
-  const branchSelect = $("#branchSelect");
-  branchSelect.innerHTML = ["All Sites", ...branches]
-    .map((b) => `<option value="${b === "All Sites" ? "All" : b}">${b}</option>`)
-    .join("");
-  if (!branches.includes(state.branch)) state.branch = "All";
-  branchSelect.value = state.branch;
-}
-
-function refreshChips(containerSel, field) {
-  const pool = scoped(state.raw, { ignoreChannel: field === "channel", ignoreCategory: field === "category" });
-  const values = uniq(pool.map((r) => r[field])).sort();
-  const activeSet = field === "channel" ? state.channels : state.categories;
-  // prune stale selections, default to "all active" (empty set = no filter)
-  [...activeSet].forEach((v) => { if (!values.includes(v)) activeSet.delete(v); });
-
-  const container = $(containerSel);
-  container.innerHTML = values
-    .map((v) => `<button type="button" class="chip${activeSet.has(v) ? " active" : ""}" data-field="${field}" data-value="${v}">${v}</button>`)
-    .join("");
 }
 
 function wireFilterEvents() {
-  $("#principalSelect").addEventListener("change", (e) => {
-    state.principal = e.target.value;
-    state.branch = "All";
-    refreshBranchOptions();
-    refreshChips("#channelChips", "channel");
-    refreshChips("#categoryChips", "category");
+  // Metric Type toggle (Amount / Volume) — a full context switch, so it
+  // re-syncs every filter dropdown against the newly-selected metric's data
+  $("#metricToggle").addEventListener("click", (e) => {
+    const btn = e.target.closest(".metric-btn");
+    if (!btn || btn.classList.contains("active")) return;
+    state.metricType = btn.dataset.metric;
+    $$(".metric-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    populateFilters();
     render();
   });
-  $("#branchSelect").addEventListener("change", (e) => { state.branch = e.target.value; render(); });
 
+  // checkbox toggles
+  document.body.addEventListener("change", (e) => {
+    const cb = e.target.closest('input[type="checkbox"][data-field]');
+    if (!cb) return;
+    const field = cb.dataset.field;
+    const stateKey = FIELD_TO_STATE_KEY[field];
+    const set = state[stateKey];
+
+    if (field === "period" && !cb.checked && set.size <= 1) {
+      cb.checked = true; // never allow zero periods selected
+      return;
+    }
+
+    if (cb.checked) set.add(cb.value); else set.delete(cb.value);
+    handleFieldChanged(field);
+    render();
+  });
+
+  // Select All / Uncheck All bulk actions, and open/close toggling
   document.body.addEventListener("click", (e) => {
-    const chip = e.target.closest(".chip");
-    if (!chip) return;
-    const field = chip.dataset.field;
-    const value = chip.dataset.value;
+    const bulkBtn = e.target.closest("[data-bulk]");
+    if (bulkBtn) {
+      const panel = bulkBtn.closest(".dropdown-panel");
+      const field = panel.dataset.panel;
+      const stateKey = FIELD_TO_STATE_KEY[field];
+      const values = displayValues(field);
+      const isSelectAll = bulkBtn.dataset.bulk === "all";
 
-    if (field === "period") {
-      // multi-select, but never allow zero periods selected
-      if (state.periods.has(value) && state.periods.size > 1) state.periods.delete(value);
-      else state.periods.add(value);
-      populatePeriodChips();
+      state[stateKey] = isSelectAll
+        ? new Set(values)
+        : (field === "period" && values.length ? new Set([values[0]]) : new Set());
+      handleFieldChanged(field);
       render();
       return;
     }
 
-    const set = field === "channel" ? state.channels : state.categories;
-    set.has(value) ? set.delete(value) : set.add(value);
-    chip.classList.toggle("active");
-    render();
+    const btn = e.target.closest(".dropdown-btn");
+    if (btn) {
+      const filter = btn.closest(".dropdown-filter");
+      const wasOpen = filter.classList.contains("open");
+      document.querySelectorAll(".dropdown-filter.open").forEach((f) => f.classList.remove("open"));
+      if (!wasOpen) filter.classList.add("open");
+      return;
+    }
+
+    if (!e.target.closest(".dropdown-filter")) {
+      document.querySelectorAll(".dropdown-filter.open").forEach((f) => f.classList.remove("open"));
+    }
   });
 
   $("#refreshBtn").addEventListener("click", async () => {
@@ -304,7 +649,7 @@ function wireFilterEvents() {
     btn.classList.add("spinning");
     try {
       const result = await loadData();
-      state.raw = result.rows;
+      state.raw = normalizeRows(result.rows);
       state.source = result.source;
       state.sourceErrors = result.errors;
       populateFilters();
@@ -352,6 +697,46 @@ function periodRows(rows) {
   return rows.filter((r) => state.periods.has(`${r.year}-${MONTHS.indexOf(r.month)}`));
 }
 
+/* ---------------- Theoretical Target (pacing) ---------------- */
+
+function daysInMonth(year, monthIndex) {
+  return new Date(year, monthIndex + 1, 0).getDate();
+}
+
+/** Days elapsed in a given (year, monthIndex), for pacing purposes:
+ * a fully-past month counts as 100% elapsed, a not-yet-started future
+ * month as 0% elapsed, and the current month as "today's date so far". */
+function daysElapsedInPeriod(year, monthIndex) {
+  const total = daysInMonth(year, monthIndex);
+  const now = new Date();
+  const curY = now.getFullYear();
+  const curM = now.getMonth();
+  if (year < curY || (year === curY && monthIndex < curM)) return total; // past month — fully elapsed
+  if (year > curY || (year === curY && monthIndex > curM)) return 0; // future month — not started
+  return Math.min(now.getDate(), total); // current month — elapsed so far
+}
+
+/** Theoretical Target = Σ over each (year, month) present in `rows` of:
+ *   (days elapsed in that month ÷ total days in that month) × that month's Target
+ * Computed per-month before summing, so a multi-period selection prorates
+ * each month independently rather than using one blended day-count. */
+function theoreticalTarget(rows) {
+  const byPeriod = new Map();
+  rows.forEach((r) => {
+    const mi = MONTHS.indexOf(r.month);
+    const key = `${r.year}-${mi}`;
+    if (!byPeriod.has(key)) byPeriod.set(key, { year: r.year, mi, target: 0 });
+    byPeriod.get(key).target += r.target;
+  });
+  let total = 0;
+  byPeriod.forEach(({ year, mi, target }) => {
+    const days = daysInMonth(year, mi);
+    const elapsed = daysElapsedInPeriod(year, mi);
+    total += days ? (elapsed / days) * target : 0;
+  });
+  return total;
+}
+
 function renderSummary(rows) {
   const grid = $("#summaryGrid");
   if (!rows.length) {
@@ -362,13 +747,24 @@ function renderSummary(rows) {
   const target = current.reduce((s, r) => s + r.target, 0);
   const actual = current.reduce((s, r) => s + r.actual, 0);
   const achievement = target ? (actual / target) * 100 : 0;
+  const theoreticalTgt = theoreticalTarget(current);
+  const theoreticalBalance = actual - theoreticalTgt; // negative = behind pace, positive/zero = on or ahead of pace
+  const balance = target - actual; // positive = shortfall, negative = surplus
 
-  // YoY: compare same months across 2025 vs 2026 within full (unfiltered-by-period) rows
-  const yoy2025 = rows.filter((r) => r.year === 2025 && MONTHS.indexOf(r.month) < 7);
-  const yoy2026 = rows.filter((r) => r.year === 2026);
+  // YoY: compare the same span of months between the latest year present
+  // and the year before it, using whatever the latest month actually in
+  // the data is (not a hardcoded cutoff) — full (unfiltered-by-period) rows
+  const yearsPresent = uniq(rows.map((r) => r.year)).sort((a, b) => b - a);
+  const yoyYear = yearsPresent[0];
+  const priorYear = yoyYear - 1;
+  const yoyMonthIndices = uniq(rows.filter((r) => r.year === yoyYear).map((r) => MONTHS.indexOf(r.month)));
+  const yoyMaxMonth = yoyMonthIndices.length ? Math.max(...yoyMonthIndices) : 11;
+  const yoy2025 = rows.filter((r) => r.year === priorYear && MONTHS.indexOf(r.month) <= yoyMaxMonth);
+  const yoy2026 = rows.filter((r) => r.year === yoyYear);
   const sum2025 = yoy2025.reduce((s, r) => s + r.actual, 0);
   const sum2026 = yoy2026.reduce((s, r) => s + r.actual, 0);
   const yoyGrowth = sum2025 ? ((sum2026 - sum2025) / sum2025) * 100 : 0;
+  const yoyRangeLabel = `${MONTHS[0]}–${MONTHS[yoyMaxMonth]}`;
 
   const bySite = {};
   current.forEach((r) => {
@@ -405,7 +801,7 @@ function renderSummary(rows) {
       <div class="delta">Target ${fmtCompact(target)}</div>
     </div>
     <div class="summary-card ${yoyGrowth < 0 ? "alert" : ""}">
-      <div class="label">YoY Growth (Jan–Jul, 2025 vs 2026)</div>
+      <div class="label">YoY Growth (${yoyRangeLabel}, ${priorYear} vs ${yoyYear})</div>
       <div class="value">${yoyGrowth >= 0 ? "+" : ""}${yoyGrowth.toFixed(1)}%</div>
       <div class="delta ${yoyGrowth >= 0 ? "up" : "down"}">${fmtCompact(sum2025)} → ${fmtCompact(sum2026)}</div>
     </div>
@@ -414,9 +810,25 @@ function renderSummary(rows) {
       <div class="value" style="font-size:18px;">${best ? best.key : "—"}</div>
       <div class="delta up">${best ? best.pct.toFixed(1) + "% achieved" : ""}</div>
     </div>
+    <div class="summary-card ${actual < theoreticalTgt ? "alert" : ""}">
+      <div class="label">Theoretical Target — ${periodLabel}</div>
+      <div class="value">${fmtCompact(theoreticalTgt)}</div>
+      <div class="delta ${actual >= theoreticalTgt ? "up" : "down"}">${actual >= theoreticalTgt ? "Ahead of" : "Behind"} pace by ${fmtCompact(Math.abs(actual - theoreticalTgt))}</div>
+    </div>
+    <div class="summary-card ${balance > 0 ? "alert" : ""}">
+      <div class="label">Balance — ${periodLabel}</div>
+      <div class="value">${fmtCompact(Math.abs(balance))}</div>
+      <div class="delta ${balance <= 0 ? "up" : "down"}">${balance > 0 ? "Short of target" : "Over target"}</div>
+    </div>
+    <div class="summary-card ${theoreticalBalance < 0 ? "alert" : ""}">
+      <div class="label">Theoretical Balance — ${periodLabel}</div>
+      <div class="value">${theoreticalBalance >= 0 ? "+" : "-"}${fmtCompact(Math.abs(theoreticalBalance))}</div>
+      <div class="delta ${theoreticalBalance >= 0 ? "up" : "down"}">${theoreticalBalance >= 0 ? "At or ahead of pace" : "Behind pace"}</div>
+    </div>
     <div class="summary-narrative">
-      <strong>${periodLabel}:</strong> ${state.principal === "All" ? "All principals" : state.principal} reached
-      <strong>${achievement.toFixed(1)}%</strong> of target (${fmtCompact(actual)} of ${fmtCompact(target)}).
+      <strong>${periodLabel}:</strong> ${selectionSummaryText("principal")} reached
+      <strong>${achievement.toFixed(1)}%</strong> of target (${fmtCompact(actual)} of ${fmtCompact(target)}),
+      ${actual >= theoreticalTgt ? "running ahead of" : "trailing"} the theoretical (day-prorated) target of ${fmtCompact(theoreticalTgt)}.
       ${worst ? `The segment needing the most attention is <strong>${worst.key}</strong> at ${worst.pct.toFixed(1)}% achievement.` : ""}
       Year-over-year sellout is ${yoyGrowth >= 0 ? "up" : "down"} ${Math.abs(yoyGrowth).toFixed(1)}% versus the same months last year.
     </div>
@@ -453,19 +865,28 @@ function renderTrendChart(rows) {
 }
 
 function renderYoyChart(rows) {
-  const months2025 = MONTHS.slice(0, 12);
-  const dataFor = (year) => months2025.map((m) => rows.filter((r) => r.year === year && r.month === m).reduce((s, r) => s + r.actual, 0));
-  const d2025 = dataFor(2025);
-  const d2026 = MONTHS.slice(0, 7).map((m) => rows.filter((r) => r.year === 2026 && r.month === m).reduce((s, r) => s + r.actual, 0));
+  const years = uniq(rows.map((r) => r.year)).sort((a, b) => b - a);
+  const currentYear = years[0];
+  const priorYear = currentYear !== undefined ? currentYear - 1 : undefined;
+
+  // show exactly as many months as actually exist for the current year
+  // (e.g. through August if August data is present) — never a hardcoded cutoff
+  const monthIndices = uniq(rows.filter((r) => r.year === currentYear).map((r) => MONTHS.indexOf(r.month)));
+  const maxMonthIdx = monthIndices.length ? Math.max(...monthIndices) : 11;
+  const monthsToShow = MONTHS.slice(0, maxMonthIdx + 1);
+
+  const dataFor = (year) => monthsToShow.map((m) => rows.filter((r) => r.year === year && r.month === m).reduce((s, r) => s + r.actual, 0));
+  const dPrior = dataFor(priorYear);
+  const dCurrent = dataFor(currentYear);
 
   if (yoyChart) yoyChart.destroy();
   yoyChart = new Chart($("#yoyChart"), {
     type: "bar",
     data: {
-      labels: months2025,
+      labels: monthsToShow,
       datasets: [
-        { label: "2025", data: d2025, backgroundColor: BRAND.red + "cc", borderRadius: 4, maxBarThickness: 18 },
-        { label: "2026", data: [...d2026, ...Array(5).fill(null)], backgroundColor: BRAND.blue, borderRadius: 4, maxBarThickness: 18 },
+        { label: String(priorYear), data: dPrior, backgroundColor: BRAND.red + "cc", borderRadius: 4, maxBarThickness: 18 },
+        { label: String(currentYear), data: dCurrent, backgroundColor: BRAND.blue, borderRadius: 4, maxBarThickness: 18 },
       ],
     },
     options: chartBaseOptions((ctx) => `${ctx.dataset.label}: ${fmtPeso(ctx.parsed.y)}`),
@@ -634,11 +1055,13 @@ function computeSiteTopline(rows) {
     const actual = current.reduce((s, r) => s + r.actual, 0);
     const achievement = target ? (actual / target) * 100 : 0;
     const balance = target - actual; // positive = shortfall, negative = surplus
+    const theoreticalTgt = theoreticalTarget(current);
+    const theoreticalBalance = actual - theoreticalTgt; // negative = behind pace, positive/zero = on or ahead of pace
     const historical = branchRows
       .filter((r) => histPeriods.has(`${r.year}-${MONTHS.indexOf(r.month)}`))
       .reduce((s, r) => s + r.actual, 0);
     const growth = historical ? ((actual / historical) - 1) * 100 : null;
-    return { branch, target, actual, achievement, balance, historical, growth };
+    return { branch, target, actual, achievement, balance, theoreticalTgt, theoreticalBalance, historical, growth };
   });
 }
 
@@ -670,6 +1093,10 @@ function renderTopline(rows) {
               <span class="m-value ${s.balance > 0 ? "down" : "up"}">${fmtCompact(Math.abs(s.balance))} ${s.balance > 0 ? "short" : "over"}</span>
             </div>
             <div>
+              <span class="m-label">Theoretical Balance</span>
+              <span class="m-value ${s.theoreticalBalance < 0 ? "down" : "up"}">${s.theoreticalBalance >= 0 ? "+" : "-"}${fmtCompact(Math.abs(s.theoreticalBalance))}</span>
+            </div>
+            <div>
               <span class="m-label">Growth YoY</span>
               <span class="m-value ${s.growth == null ? "" : s.growth >= 0 ? "up" : "down"}">${s.growth == null ? "—" : (s.growth >= 0 ? "+" : "") + s.growth.toFixed(1) + "%"}</span>
             </div>
@@ -685,12 +1112,12 @@ function renderTopline(rows) {
     toplineCharts[s.branch] = new Chart(canvas, {
       type: "bar",
       data: {
-        labels: ["Historical", "Target", "Actual"],
+        labels: ["Historical", "Target", "Theoretical", "Actual"],
         datasets: [{
-          data: [s.historical, s.target, s.actual],
-          backgroundColor: [BRAND.gray, BRAND.blue, s.actual >= s.target ? "#1E7B3E" : BRAND.red],
+          data: [s.historical, s.target, s.theoreticalTgt, s.actual],
+          backgroundColor: [BRAND.gray, BRAND.blue, "#F0A202", s.actual >= s.target ? "#1E7B3E" : BRAND.red],
           borderRadius: 4,
-          maxBarThickness: 42,
+          maxBarThickness: 34,
         }],
       },
       options: {
@@ -783,7 +1210,7 @@ function renderDimensionCharts(rows) {
 
 function renderRecommendations() {
   const grid = $("#recGrid");
-  const principals = state.principal === "All" ? uniq(state.raw.map((r) => r.principal)).sort() : [state.principal];
+  const principals = uniq(state.raw.map((r) => r.principal)).filter((p) => state.principals.has(p)).sort();
   const cards = [];
 
   principals.forEach((principal) => {
@@ -837,11 +1264,11 @@ function renderRecommendations() {
 
 /* ---------------- Init ---------------- */
 
-(async function init() {
+async function startDashboard() {
   wireFilterEvents();
   try {
     const result = await loadData();
-    state.raw = result.rows;
+    state.raw = normalizeRows(result.rows);
     state.source = result.source;
     state.sourceErrors = result.errors;
     populateFilters();
@@ -850,5 +1277,17 @@ function renderRecommendations() {
   } catch (err) {
     $("#summaryGrid").innerHTML = `<div class="state-banner error">Could not load sales data. Check data/sheets-config.json and data/sales-data.json.</div>`;
     console.error(err);
+  }
+}
+
+(async function init() {
+  wireLoginForm();
+  const existing = restoreSession();
+  if (existing) {
+    applySession(existing);
+    hideLoginScreen();
+    await startDashboard();
+  } else {
+    showLoginScreen();
   }
 })();
