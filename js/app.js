@@ -319,6 +319,17 @@ function hideLoginScreen() {
 }
 
 function wireLoginForm() {
+  $("#passwordToggleBtn").addEventListener("click", () => {
+    const input = $("#loginPassword");
+    const btn = $("#passwordToggleBtn");
+    const isHidden = input.type === "password";
+    input.type = isHidden ? "text" : "password";
+    btn.querySelector(".eye-open").style.display = isHidden ? "none" : "";
+    btn.querySelector(".eye-closed").style.display = isHidden ? "" : "none";
+    btn.setAttribute("aria-label", isHidden ? "Hide password" : "Show password");
+    btn.setAttribute("aria-pressed", isHidden ? "true" : "false");
+  });
+
   $("#loginForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const username = $("#loginUsername").value;
